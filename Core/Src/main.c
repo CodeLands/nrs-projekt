@@ -516,13 +516,6 @@ void Configure_ESP_As_Access_Point(void) {
             Send_Command(html_page2);
             break;
 
-        /*case AT_SEND_CONNECT_REQUEST:
-#ifdef DEBUG
-            CDC_Transmit_FS((uint8_t *)"Sending WiFi Connect to SSID should happen upon submit instead\r\n", 64);
-            HAL_Delay(10);
-#endif
-            break;*/
-
         default:
 #ifdef DEBUG
             CDC_Transmit_FS((uint8_t *)"That Setup Stage not implemented yet\r\n", 38);
