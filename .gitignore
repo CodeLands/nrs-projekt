@@ -1,5 +1,6 @@
-.metadata
-.settings
-[Rr]elease
-[Dd]ebug
-.launch
+stm32_modul/.metadata
+stm32_modul/.settings
+stm32_modul/[Rr]elease
+stm32_modul/[Dd]ebug
+stm32_modul/.launch
+node_modules/

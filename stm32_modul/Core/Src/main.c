@@ -128,6 +128,8 @@ volatile uint8_t was_client_connected = 0;
 volatile uint8_t is_client_requesting_page = 0;
 volatile uint8_t was_client_requesting_page = 0;
 
+uint8_t connection_established = 0;
+
 //#define RX_TIMEOUT_MS 1000 // Timeout for data reception in milliseconds
 
 volatile uint32_t last_rx_tick = 0;  // Time of the last received byte
@@ -157,6 +159,7 @@ void Verify_Sensors(void);
 void Clear_Interrupts(void);
 void Send_Command(const char* cmd);
 void Change_Response_Status(uint8_t new_status);
+void Send_Data_To_Server(const char *json_data);
 
 #if ENABLE_MAGNETOMETER
 void Handle_Magnetometer(void);
@@ -335,11 +338,26 @@ void Pack_Data(uint8_t *binary_buffer, uint16_t header, int16_t x, int16_t y, in
 
 /* ASCII transmission function */
 void Transmit_Data_ASCII(const char *sensor_label, float x, float y, float z) {
+	 static uint32_t last_send_time = 0;
+	 const uint32_t MIN_SEND_INTERVAL = 100;
+
     char ascii_buffer[BUFFER_SIZE];
-    snprintf(ascii_buffer, BUFFER_SIZE, "{\"%s\":%d,\"X\":%.3f,\"Y\":%.3f,\"Z\":%.3f}\n\r",
+    snprintf(ascii_buffer, BUFFER_SIZE, "{\"%s\":%d,\"X\":%.3f,\"Y\":%.3f,\"Z\":%.3f}",
              sensor_label, packet_number, x, y, z);
     if (transmission_mode == MODE_ASCII_UART) {
-        HAL_UART_Transmit(&huart2, (uint8_t *)ascii_buffer, strlen(ascii_buffer), HAL_MAX_DELAY);
+    	// Pošlji na UART
+        // HAL_UART_Transmit(&huart2, (uint8_t *)ascii_buffer, strlen(ascii_buffer), HAL_MAX_DELAY);
+        // pošiljanje podatkov ESP-ju
+       	if (connection_established) {
+       		if (connection_established) {
+				// Preveri časovni interval
+				uint32_t current_time = HAL_GetTick();
+				if (current_time - last_send_time >= MIN_SEND_INTERVAL) {
+					Send_Data_To_Server(ascii_buffer);
+					last_send_time = current_time;
+				}
+			}
+       	}
     } else if (transmission_mode == MODE_ASCII_CDC) {
         CDC_Transmit_FS((uint8_t *)ascii_buffer, strlen(ascii_buffer));
     }
@@ -860,6 +878,113 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 }
 
 
+void Establish_Connection(const char *server_ip, uint16_t port) {
+    char cmd[128];
+
+    // Zapri obstoječo povezavo, če obstaja
+    Send_Command("AT+CIPCLOSE=0\r\n");
+    HAL_Delay(100); // Kratek zamik za zaprtje povezave
+    Clear_RX_Buffer();
+
+    // Pošlji ukaz za vzpostavitev TCP povezave
+    snprintf(cmd, sizeof(cmd), "AT+CIPSTART=0,\"TCP\",\"%s\",%d\r\n", server_ip, port);
+    Send_Command(cmd);
+
+    // Preverjaj odziv za omejen čas
+    uint32_t start_time = HAL_GetTick();
+    while ((HAL_GetTick() - start_time) < 5000) { // 5 sekund timeout
+        if (strstr((char *)rx_buffer, "CONNECT")) {
+            CDC_Transmit_FS((uint8_t *)"TCP connection established\n", 26);
+            Change_Response_Status(SUCCESS);
+            Clear_RX_Buffer();
+            return;
+        } else if (strstr((char *)rx_buffer, "ERROR") || strstr((char *)rx_buffer, "CLOSED")) {
+            CDC_Transmit_FS((uint8_t *)"TCP connection failed\n", 23);
+            Change_Response_Status(ERROR);
+            Clear_RX_Buffer();
+            return;
+        }
+    }
+
+    // Če ni odgovora v določenem času
+    CDC_Transmit_FS((uint8_t *)"Connection attempt timed out\n", 29);
+    Change_Response_Status(TIMEOUT);
+    Clear_RX_Buffer();
+}
+void Send_Data_To_Server(const char *json_data) {
+    char request[512];
+    char cmd[128];
+    uint32_t start_time;
+
+    // Oblikuj HTTP POST zahtevo
+    snprintf(request, sizeof(request),
+             "POST /data HTTP/1.1\r\n"
+             "Host: 172.20.10.11\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %d\r\n"
+             "Connection: keep-alive\r\n\r\n"
+             "%s",
+             strlen(json_data), json_data);
+
+    if (strlen(request) > 512) {
+        CDC_Transmit_FS((uint8_t *)"Data too large to send\n", 23);
+        return;
+    }
+
+    // Preveri status povezave
+    Send_Command("AT+CIPSTATUS\r\n");
+    HAL_Delay(100);
+    if (strstr((char *)rx_buffer, "STATUS:4") || strstr((char *)rx_buffer, "STATUS:5")) {
+        CDC_Transmit_FS((uint8_t *)"Connection lost\n", 17);
+        Clear_RX_Buffer();
+        Establish_Connection("172.20.10.11", 5000);
+        return;
+    }
+    Clear_RX_Buffer();
+
+    // Pošlji CIPSEND ukaz
+    snprintf(cmd, sizeof(cmd), "AT+CIPSEND=0,%d\r\n", strlen(request));
+    Send_Command(cmd);
+
+    // Čakaj na '>' prompt
+    start_time = HAL_GetTick();
+    while ((HAL_GetTick() - start_time) < 2000) {
+        if (strstr((char *)rx_buffer, ">")) {
+            break;
+        }
+    }
+
+    if (!strstr((char *)rx_buffer, ">")) {
+        CDC_Transmit_FS((uint8_t *)"ESP not ready for data\n", 23);
+        Clear_RX_Buffer();
+        return;
+    }
+    Clear_RX_Buffer();
+
+    // Pošlji podatke
+    HAL_UART_Transmit(&huart2, (uint8_t *)request, strlen(request), HAL_MAX_DELAY);
+
+    // Čakaj na "SEND OK"
+    start_time = HAL_GetTick();
+    while ((HAL_GetTick() - start_time) < 2000) {
+        if (strstr((char *)rx_buffer, "SEND OK")) {
+            CDC_Transmit_FS((uint8_t *)"Data sent successfully\n", 23);
+            Clear_RX_Buffer();
+            return;
+        }
+        HAL_Delay(10);
+    }
+
+    CDC_Transmit_FS((uint8_t *)"Send timeout\n", 13);
+    Clear_RX_Buffer();
+}
+
+void Test_HTTP_GET_Request() {
+    const char *get_request = "GET / HTTP/1.1\r\nHost: 172.20.10.11\r\n\r\n";
+    Send_Data_To_Server(get_request);
+}
+
+
 /* USER CODE END 0 */
 
 /**
@@ -892,7 +1017,7 @@ int main(void)
   Clear_Interrupts(); // Clear interrupt flags
   Log_Response_Status_Change();
     rx_index = 0;
-HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
+  HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
   /* USER CODE END 2 */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -926,25 +1051,42 @@ HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
           button_action_pending = 0;
       }
 
-      if (transmission_mode == MODE_NONE) {
-          continue;
-      }
+      if (!connection_established && transmission_mode == MODE_ASCII_UART)
+	  {
+		  CDC_Transmit_FS((uint8_t *)"Attempting to connect...\n", 25);
+		  Establish_Connection("172.20.10.11", 5000);
 
-		#if ENABLE_MAGNETOMETER
-		if (data_ready_mag) {
-			Handle_Magnetometer();
-		}
-		#endif
-		#if ENABLE_ACCELEROMETER
-		if (data_ready_acc) {
-			Handle_Accelerometer();
-		}
-		#endif
-		#if ENABLE_GYROSCOPE
-		if (data_ready_gyr) {
-			Handle_Gyroscope();
-		}
-		#endif
+		  /* Preveri status povezave */
+		  if (response_status == SUCCESS)
+		  {
+			  CDC_Transmit_FS((uint8_t *)"Connection successful!\n", 24);
+			  connection_established = 1; // Povezava vzpostavljena
+		  }
+		  else if (response_status == TIMEOUT || response_status == ERROR)
+		  {
+			  CDC_Transmit_FS((uint8_t *)"Connection failed, retrying...\n", 31);
+			  HAL_Delay(1000); // Počakaj pred ponovnim poskusom
+		  }
+	  }
+
+	  /* Tukaj obdeluj podatke le, če je povezava vzpostavljena */
+	  if (connection_established)
+	  {
+		  //Test_HTTP_GET_Request();
+
+		  #if ENABLE_MAGNETOMETER
+		  if (data_ready_mag)
+			  Handle_Magnetometer();
+		  #endif
+		  #if ENABLE_ACCELEROMETER
+		  if (data_ready_acc)
+			  Handle_Accelerometer();
+		  #endif
+		  #if ENABLE_GYROSCOPE
+		  if (data_ready_gyr)
+			  Handle_Gyroscope();
+		  #endif
+	  }
   }
   /* USER CODE END 3 */
 }
