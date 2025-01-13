@@ -14,5 +14,7 @@ def receive_data():
     print("Prejeti podatki:", data)
     return "Podatki prejeti!", 200
 
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)  # strežnik posluša na vseh omrežnih vmesnikih
+

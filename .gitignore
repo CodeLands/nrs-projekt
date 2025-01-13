@@ -4,3 +4,4 @@ stm32_modul/[Rr]elease
 stm32_modul/[Dd]ebug
 stm32_modul/.launch
 node_modules/
+__pycache__/

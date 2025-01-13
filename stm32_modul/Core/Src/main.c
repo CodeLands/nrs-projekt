@@ -349,13 +349,11 @@ void Transmit_Data_ASCII(const char *sensor_label, float x, float y, float z) {
         // HAL_UART_Transmit(&huart2, (uint8_t *)ascii_buffer, strlen(ascii_buffer), HAL_MAX_DELAY);
         // pošiljanje podatkov ESP-ju
        	if (connection_established) {
-       		if (connection_established) {
-				// Preveri časovni interval
-				uint32_t current_time = HAL_GetTick();
-				if (current_time - last_send_time >= MIN_SEND_INTERVAL) {
-					Send_Data_To_Server(ascii_buffer);
-					last_send_time = current_time;
-				}
+			// Preveri časovni interval
+			uint32_t current_time = HAL_GetTick();
+			if (current_time - last_send_time >= MIN_SEND_INTERVAL) {
+				Send_Data_To_Server(ascii_buffer);
+				last_send_time = current_time;
 			}
        	}
     } else if (transmission_mode == MODE_ASCII_CDC) {
@@ -911,12 +909,22 @@ void Establish_Connection(const char *server_ip, uint16_t port) {
     Change_Response_Status(TIMEOUT);
     Clear_RX_Buffer();
 }
+
 void Send_Data_To_Server(const char *json_data) {
+    static uint32_t last_send_time = 0;
+    const uint32_t MIN_INTERVAL = 500; // Minimum 500ms between sends
+    uint32_t current_time = HAL_GetTick();
+
+    // Check if enough time has passed since last send
+    if (current_time - last_send_time < MIN_INTERVAL) {
+        return;
+    }
+
     char request[512];
     char cmd[128];
     uint32_t start_time;
 
-    // Oblikuj HTTP POST zahtevo
+    // Format HTTP POST request
     snprintf(request, sizeof(request),
              "POST /data HTTP/1.1\r\n"
              "Host: 172.20.10.11\r\n"
@@ -931,51 +939,90 @@ void Send_Data_To_Server(const char *json_data) {
         return;
     }
 
-    // Preveri status povezave
+    // Add more debug output
+    CDC_Transmit_FS((uint8_t *)"Checking connection status...\n", 29);
+
+    // Check connection status
     Send_Command("AT+CIPSTATUS\r\n");
     HAL_Delay(100);
+
     if (strstr((char *)rx_buffer, "STATUS:4") || strstr((char *)rx_buffer, "STATUS:5")) {
-        CDC_Transmit_FS((uint8_t *)"Connection lost\n", 17);
+        CDC_Transmit_FS((uint8_t *)"Connection lost, reconnecting...\n", 32);
         Clear_RX_Buffer();
-        Establish_Connection("172.20.10.11", 5000);
+        connection_established = 0;
         return;
     }
-    Clear_RX_Buffer();
 
-    // Pošlji CIPSEND ukaz
+    Clear_RX_Buffer();
+    CDC_Transmit_FS((uint8_t *)"Sending CIPSEND command...\n", 27);
+
+    // Send CIPSEND command
     snprintf(cmd, sizeof(cmd), "AT+CIPSEND=0,%d\r\n", strlen(request));
     Send_Command(cmd);
+    HAL_Delay(200);  // Wait for ESP to process command
 
-    // Čakaj na '>' prompt
+    // Wait for '>' prompt with better debug output
     start_time = HAL_GetTick();
-    while ((HAL_GetTick() - start_time) < 2000) {
-        if (strstr((char *)rx_buffer, ">")) {
-            break;
-        }
-    }
+    uint8_t got_prompt = 0;
+    uint8_t retries = 0;
+    const uint8_t MAX_RETRIES = 3;
 
-    if (!strstr((char *)rx_buffer, ">")) {
-        CDC_Transmit_FS((uint8_t *)"ESP not ready for data\n", 23);
-        Clear_RX_Buffer();
-        return;
-    }
+	while (retries < MAX_RETRIES) {
+		while ((HAL_GetTick() - start_time) < 1000) { // Zmanjšaj timeout na 1 sekundo
+			if (strstr((char *)rx_buffer, ">")) {
+				got_prompt = 1;
+				CDC_Transmit_FS((uint8_t *)"Received '>' prompt\n", 20);
+				HAL_Delay(50);
+				break;
+			}
+			HAL_Delay(10);
+		}
+
+		if (got_prompt) break;
+
+		// Če nismo dobili prompta, poskusi ponovno
+		retries++;
+		if (retries < MAX_RETRIES) {
+			CDC_Transmit_FS((uint8_t *)"Retrying CIPSEND...\n", 20);
+			Clear_RX_Buffer();
+			Send_Command(cmd);
+			HAL_Delay(200);
+			start_time = HAL_GetTick();
+		}
+	}
+
+	if (!got_prompt) {
+		CDC_Transmit_FS((uint8_t *)"Failed after max retries\n", 25);
+		Clear_RX_Buffer();
+		connection_established = 0; // Resetiraj povezavo
+		return;
+	}
+
     Clear_RX_Buffer();
+    CDC_Transmit_FS((uint8_t *)"Sending data...\n", 16);
 
-    // Pošlji podatke
+    // Send data
     HAL_UART_Transmit(&huart2, (uint8_t *)request, strlen(request), HAL_MAX_DELAY);
 
-    // Čakaj na "SEND OK"
+    // Wait for "SEND OK" with timeout
     start_time = HAL_GetTick();
+    uint8_t send_ok = 0;
+
     while ((HAL_GetTick() - start_time) < 2000) {
         if (strstr((char *)rx_buffer, "SEND OK")) {
+            send_ok = 1;
             CDC_Transmit_FS((uint8_t *)"Data sent successfully\n", 23);
-            Clear_RX_Buffer();
-            return;
+            last_send_time = HAL_GetTick(); // Update last send time
+            break;
         }
         HAL_Delay(10);
     }
 
-    CDC_Transmit_FS((uint8_t *)"Send timeout\n", 13);
+    if (!send_ok) {
+        CDC_Transmit_FS((uint8_t *)"Send timeout - Response:\n", 25);
+        CDC_Transmit_FS(rx_buffer, strlen((char *)rx_buffer));
+    }
+
     Clear_RX_Buffer();
 }
 
