@@ -968,7 +968,7 @@ void Send_Data_To_Server(const char *json_data) {
     const uint8_t MAX_RETRIES = 3;
 
 	while (retries < MAX_RETRIES) {
-		while ((HAL_GetTick() - start_time) < 1000) { // Zmanjšaj timeout na 1 sekundo
+		while ((HAL_GetTick() - start_time) < 1000) {
 			if (strstr((char *)rx_buffer, ">")) {
 				got_prompt = 1;
 				CDC_Transmit_FS((uint8_t *)"Received '>' prompt\n", 20);
@@ -1031,6 +1031,18 @@ void Test_HTTP_GET_Request() {
     Send_Data_To_Server(get_request);
 }
 
+void Indicate_Transmission_Mode(uint8_t mode) {
+    #ifdef DEBUG
+    const char *modes[] = {
+        "None", "Binary UART", "ASCII UART",
+        "Binary CDC", "ASCII CDC"
+    };
+    char debug_msg[50];
+    HAL_GPIO_TogglePin(GPIOE, LED_PIN_SEND_MODE); // Signal prek LED
+    snprintf(debug_msg, sizeof(debug_msg), "Mode changed to: %s\n", modes[mode]);
+    CDC_Transmit_FS((uint8_t *)debug_msg, strlen(debug_msg));
+    #endif
+}
 
 /* USER CODE END 0 */
 
@@ -1091,9 +1103,7 @@ int main(void)
               Change_Response_Status(SEND_REQUEST);
           } else { // Long press - change transmission mode
               transmission_mode = (transmission_mode + 1) % 5;
-      #ifdef DEBUG
-              HAL_GPIO_TogglePin(GPIOE, LED_PIN_SEND_MODE);
-      #endif
+              Indicate_Transmission_Mode(transmission_mode);
           }
           button_action_pending = 0;
       }
